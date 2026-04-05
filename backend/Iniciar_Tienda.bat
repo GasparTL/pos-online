@@ -1,16 +1,16 @@
-@off
+@echo off
 title Sistema de Tienda Portable
-color 0b
+set NODE_SKIP_PLATFORM_CHECK=1
 
-echo ========================================
-echo   INICIANDO MI TIENDITA PORTABLE
-echo ========================================
+echo Verificando archivos...
+if not exist "%~dp0node.exe" echo ERROR: No se encuentra node.exe en esta carpeta && pause && exit
+if not exist "%~dp0server.js" echo ERROR: No se encuentra server.js && pause && exit
+if not exist "%~dp0dist" echo ERROR: No se encuentra la carpeta dist && pause && exit
 
-:: 1. Abrir el navegador en el puerto 5000
+echo Iniciando servidor...
 start http://localhost:5000
 
-:: 2. Ejecutar el servidor usando el motor local (./node.exe)
-:: Usamos %~dp0 para asegurarnos de que Windows encuentre el archivo sin importar la letra de la USB
+:: Ejecutamos node y mantenemos la ventana abierta pase lo que pase
 "%~dp0node.exe" "%~dp0server.js"
-
+if %errorlevel% neq 0 echo El servidor se detuvo con un error. && pause
 pause
