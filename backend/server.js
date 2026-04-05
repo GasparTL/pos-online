@@ -98,7 +98,7 @@ app.get('/api/db/backup', (req, res) => {
 app.use(express.static(path.join(__dirname, 'dist')));
 
 // 2. Ruta comodín para que React maneje el diseño
-app.get('*', (req, res) => {
+app.get('(.*)', (req, res) => {
     res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
