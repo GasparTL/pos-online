@@ -4,7 +4,7 @@ const sqlite3 = require('sqlite3');
 const cors = require('cors');
 const path = require('path');
 const bcrypt = require('bcryptjs');
-const axios = require('axios'); // Asegúrate de tener instalado axios: npm install axios
+const axios = require('axios');
 
 const app = express();
 
@@ -16,13 +16,12 @@ let db;
 // --- CONFIGURACIÓN DE WHATSAPP (Meta Business API) ---
 const WHATSAPP_TOKEN = "TU_TOKEN_DE_ACCESO_PERMANENTE";
 const PHONE_NUMBER_ID = "ID_DE_TU_NUMERO_CONFIGURADO";
-const TU_NUMERO_DESTINO = "52XXXXXXXXXX"; // Tu número con código de país
+const TU_NUMERO_DESTINO = "52XXXXXXXXXX";
 
 // Función para enviar la notificación
 const enviarNotificacionPedido = async (pedido, items) => {
     const url = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
     
-    // Formateamos los productos para el mensaje
     const listaProductos = items.map(item => `- ${item.name} (Cant: ${item.qty})`).join('\n');
     
     const data = {
@@ -30,15 +29,15 @@ const enviarNotificacionPedido = async (pedido, items) => {
         to: TU_NUMERO_DESTINO,
         type: "template",
         template: {
-            name: "notificacion_nuevo_pedido", // Debe coincidir con el nombre en Meta
+            name: "notificacion_nuevo_pedido",
             language: { code: "es" },
             components: [
                 {
                     type: "body",
                     parameters: [
-                        { type: "text", text: pedido.id.toString() }, // {{1}} ID
-                        { type: "text", text: listaProductos },        // {{2}} Productos
-                        { type: "text", text: `$${pedido.total.toFixed(2)}` } // {{3}} Total
+                        { type: "text", text: pedido.id.toString() },
+                        { type: "text", text: listaProductos },
+                        { type: "text", text: `$${pedido.total.toFixed(2)}` }
                     ]
                 }
             ]
@@ -55,6 +54,23 @@ const enviarNotificacionPedido = async (pedido, items) => {
     }
 };
 
+// --- SISTEMA DE AUDITORÍA (BITÁCORA) ---
+const registrarMovimiento = async (username, module, action, description, details = {}) => {
+    try {
+        const timestamp = new Date().toISOString();
+        const user = username || 'Sistema';
+        await db.run(
+            `INSERT INTO audit_logs (timestamp, username, module, action, description, details) VALUES (?, ?, ?, ?, ?, ?)`,
+            [timestamp, user, module, action, description, JSON.stringify(details)]
+        );
+    } catch (error) {
+        console.error("❌ Error guardando bitácora:", error);
+    }
+};
+
+// Función auxiliar para extraer el usuario de la petición
+const getActionUser = (req) => req.body.actionUser || req.headers['x-action-user'] || 'Sistema';
+
 // Conexión a DB y Creación de Tablas
 (async () => {
     try {
@@ -70,6 +86,9 @@ const enviarNotificacionPedido = async (pedido, items) => {
             CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, username TEXT UNIQUE, password TEXT, role TEXT, permissions TEXT);
             CREATE TABLE IF NOT EXISTS tickets (id TEXT PRIMARY KEY, date TEXT, provider TEXT, items TEXT, subtotal REAL, iva REAL, total REAL);
             CREATE TABLE IF NOT EXISTS providers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, rfc TEXT);
+            
+            -- Nueva tabla de auditoría
+            CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, username TEXT, module TEXT, action TEXT, description TEXT, details TEXT);
         `);
 
         const userCount = await db.get('SELECT COUNT(*) as count FROM users');
@@ -82,6 +101,8 @@ const enviarNotificacionPedido = async (pedido, items) => {
                 [defaultHash, defaultPerms]
             );
             console.log('👑 Usuario Maestro creado automáticamente. Usuario: admin | Clave: admin123');
+            
+            await registrarMovimiento('Sistema', 'Sistema', 'INICIALIZACIÓN', 'Creación de usuario administrador maestro.');
         }
 
         console.log('✅ Base de datos lista.');
@@ -105,6 +126,8 @@ app.post('/api/system/setup', async (req, res) => {
         if (userCount.count > 0) return res.status(400).json({ error: 'El sistema ya está configurado.' });
         const hashedPassword = await bcrypt.hash(password, 10);
         await db.run(`INSERT INTO users (name, username, password, role, permissions) VALUES (?, ?, ?, 'Administrador', ?)`, [name, username, hashedPassword, JSON.stringify(permissions)]);
+        
+        await registrarMovimiento(username, 'Sistema', 'SETUP', 'El sistema fue configurado por primera vez.');
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: 'Error al crear el primer administrador.' }); }
 });
@@ -118,6 +141,8 @@ app.post('/api/login', async (req, res) => {
         if (!passwordMatch) return res.status(401).json({ error: 'Contraseña incorrecta.' });
         const { password: _, ...userSession } = user;
         userSession.permissions = JSON.parse(user.permissions);
+        
+        await registrarMovimiento(username, 'Autenticación', 'LOGIN', 'El usuario inició sesión exitosamente.');
         res.json(userSession);
     } catch (e) { res.status(500).json({ error: 'Error en el servidor.' }); }
 });
@@ -132,9 +157,12 @@ app.get('/api/users', async (req, res) => {
 
 app.post('/api/users', async (req, res) => {
     const { name, username, password, role, permissions } = req.body;
+    const actionUser = getActionUser(req);
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
         await db.run(`INSERT INTO users (name, username, password, role, permissions) VALUES (?, ?, ?, ?, ?)`, [name, username, hashedPassword, role, JSON.stringify(permissions)]);
+        
+        await registrarMovimiento(actionUser, 'Usuarios', 'CREAR', `Se creó un nuevo usuario: ${username} (${role}).`);
         res.json({ success: true });
     } catch (e) {
         if (e.message.includes('UNIQUE')) res.status(400).json({ error: 'El nombre de usuario ya está en uso.' });
@@ -143,8 +171,15 @@ app.post('/api/users', async (req, res) => {
 });
 
 app.delete('/api/users/:id', async (req, res) => {
-    try { await db.run('DELETE FROM users WHERE id = ?', [req.params.id]); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+    const actionUser = getActionUser(req);
+    try { 
+        const user = await db.get('SELECT username FROM users WHERE id = ?', [req.params.id]);
+        if (user) {
+            await db.run('DELETE FROM users WHERE id = ?', [req.params.id]); 
+            await registrarMovimiento(actionUser, 'Usuarios', 'ELIMINAR', `Se eliminó al usuario: ${user.username}.`);
+        }
+        res.json({ success: true }); 
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- RUTAS DE PROVEEDORES ---
@@ -155,8 +190,10 @@ app.get('/api/providers', async (req, res) => {
 
 app.post('/api/providers', async (req, res) => {
     const { name, rfc } = req.body;
+    const actionUser = getActionUser(req);
     try {
         await db.run(`INSERT INTO providers (name, rfc) VALUES (?, ?)`, [name, rfc]);
+        await registrarMovimiento(actionUser, 'Proveedores', 'CREAR', `Se agregó el proveedor: ${name}.`);
         res.json({ success: true });
     } catch (e) {
         if (e.message.includes('UNIQUE')) res.status(400).json({ error: 'Ya existe un proveedor.' });
@@ -165,40 +202,84 @@ app.post('/api/providers', async (req, res) => {
 });
 
 app.delete('/api/providers/:id', async (req, res) => {
-    try { await db.run('DELETE FROM providers WHERE id = ?', [req.params.id]); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+    const actionUser = getActionUser(req);
+    try { 
+        const prov = await db.get('SELECT name FROM providers WHERE id = ?', [req.params.id]);
+        if (prov) {
+            await db.run('DELETE FROM providers WHERE id = ?', [req.params.id]); 
+            await registrarMovimiento(actionUser, 'Proveedores', 'ELIMINAR', `Se eliminó el proveedor: ${prov.name}.`);
+        }
+        res.json({ success: true }); 
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- RUTAS DE PRODUCTOS Y VENTAS (CON WHATSAPP) ---
+// --- RUTAS DE PRODUCTOS ---
 app.get('/api/products', async (req, res) => {
     res.json(await db.all('SELECT * FROM products'));
 });
 
 app.post('/api/products', async (req, res) => {
     const { sku, name, category, stock, costPrice, salePrice, expiry, image } = req.body;
-    await db.run(`INSERT INTO products (sku, name, category, stock, costPrice, salePrice, expiry, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(sku) DO UPDATE SET name=excluded.name, stock=excluded.stock, salePrice=excluded.salePrice, image=excluded.image`, [sku, name, category, stock, costPrice, salePrice, expiry, image]);
-    res.json({ success: true });
+    const actionUser = getActionUser(req);
+    
+    try {
+        const prodExistente = await db.get('SELECT * FROM products WHERE sku = ?', [sku]);
+        
+        await db.run(
+            `INSERT INTO products (sku, name, category, stock, costPrice, salePrice, expiry, image) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?) 
+            ON CONFLICT(sku) DO UPDATE SET 
+            name=excluded.name, stock=excluded.stock, salePrice=excluded.salePrice, image=excluded.image`, 
+            [sku, name, category, stock, costPrice, salePrice, expiry, image]
+        );
+
+        if (prodExistente) {
+            let accion = 'EDITAR';
+            let desc = `Se editó el producto: ${name}.`;
+            
+            if (prodExistente.stock < stock) {
+                accion = 'AUMENTO_STOCK';
+                desc = `El stock de ${name} se incrementó de ${prodExistente.stock} a ${stock}.`;
+            } else if (prodExistente.stock > stock) {
+                accion = 'DISMINUCION_STOCK';
+                desc = `El stock de ${name} disminuyó de ${prodExistente.stock} a ${stock}.`;
+            } else if (prodExistente.salePrice !== salePrice) {
+                accion = 'CAMBIO_PRECIO';
+                desc = `El precio de ${name} cambió de $${prodExistente.salePrice} a $${salePrice}.`;
+            }
+
+            await registrarMovimiento(actionUser, 'Productos', accion, desc, { anterior: prodExistente, nuevo: req.body });
+        } else {
+            await registrarMovimiento(actionUser, 'Productos', 'CREAR', `Se agregó el nuevo producto: ${name} con ${stock} unidades.`, req.body);
+        }
+
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
+// --- RUTAS DE VENTAS ---
 app.get('/api/sales', async (req, res) => {
     const sales = await db.all('SELECT * FROM sales ORDER BY id DESC');
     res.json(sales.map(s => ({ ...s, items: JSON.parse(s.items) })));
 });
 
-// 🚀 RUTA DE VENTA ACTUALIZADA CON NOTIFICACIÓN 🚀
 app.post('/api/sales', async (req, res) => {
     const { id, date, items, subtotal, commission, total, profit, method } = req.body;
+    const actionUser = getActionUser(req);
+
     try {
         await db.run('BEGIN TRANSACTION');
-        // Insertar venta
+        
         await db.run(`INSERT INTO sales VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [id, date, JSON.stringify(items), subtotal, commission, total, profit, method]);
-        // Actualizar stock de productos existentes
+        
         for (const item of items) { 
             await db.run('UPDATE products SET stock = stock - ? WHERE sku = ?', [item.qty, item.sku]); 
         }
         await db.run('COMMIT');
 
-        // ENVIAR NOTIFICACIÓN DE WHATSAPP AL FINALIZAR
+        await registrarMovimiento(actionUser, 'Ventas', 'NUEVA_VENTA', `Se registró la venta ${id} por un total de $${total.toFixed(2)}.`, items);
         enviarNotificacionPedido({ id, total }, items);
 
         res.json({ success: true });
@@ -208,7 +289,7 @@ app.post('/api/sales', async (req, res) => {
     }
 });
 
-// --- RUTAS DE TICKETS ---
+// --- RUTAS DE TICKETS (COMPRAS) ---
 app.get('/api/tickets', async (req, res) => {
     const tickets = await db.all('SELECT * FROM tickets ORDER BY id DESC');
     res.json(tickets.map(t => ({ ...t, items: JSON.parse(t.items) })));
@@ -216,27 +297,58 @@ app.get('/api/tickets', async (req, res) => {
 
 app.post('/api/tickets', async (req, res) => {
     const { id, date, provider, items, subtotal, iva, total } = req.body;
+    const actionUser = getActionUser(req);
     try {
         await db.run(`INSERT INTO tickets VALUES (?, ?, ?, ?, ?, ?, ?)`, [id, date, provider, JSON.stringify(items), subtotal, iva, total]);
+        await registrarMovimiento(actionUser, 'Compras', 'NUEVO_TICKET', `Se registró el ticket ${id} del proveedor ${provider} por $${total}.`);
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/api/tickets/:id', async (req, res) => {
-    try { await db.run('DELETE FROM tickets WHERE id = ?', [req.params.id]); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+    const actionUser = getActionUser(req);
+    try { 
+        await db.run('DELETE FROM tickets WHERE id = ?', [req.params.id]); 
+        await registrarMovimiento(actionUser, 'Compras', 'ELIMINAR_TICKET', `Se eliminó el ticket de compra con ID: ${req.params.id}.`);
+        res.json({ success: true }); 
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- RUTAS DE AUDITORÍA (NUEVO) ---
+app.get('/api/audit', async (req, res) => {
+    try {
+        const logs = await db.all('SELECT * FROM audit_logs ORDER BY id DESC');
+        res.json(logs.map(log => ({ ...log, details: JSON.parse(log.details) })));
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/audit/clear', async (req, res) => {
+    const actionUser = getActionUser(req);
+    try {
+        await db.run('DELETE FROM audit_logs');
+        // Registramos como la primera acción post-limpieza
+        await registrarMovimiento(actionUser, 'Sistema', 'LIMPIAR_BITACORA', 'El usuario eliminó intencionalmente todo el historial del sistema.');
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- MANTENIMIENTO ---
 app.post('/api/db/clear', async (req, res) => { 
+    const actionUser = getActionUser(req);
     try {
         await db.run('DELETE FROM products'); 
         await db.run('DELETE FROM sales'); 
         await db.run('DELETE FROM tickets'); 
+        await registrarMovimiento(actionUser, 'Mantenimiento', 'VACIAR_BASE_DATOS', 'El usuario eliminó todos los productos, ventas y tickets del sistema.');
         res.json({ success: true }); 
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.get('/api/db/backup', (req, res) => res.download(path.join(__dirname, 'tienda.db')));
+
+app.get('/api/db/backup', async (req, res) => {
+    const actionUser = req.query.actionUser || 'Sistema'; // Aquí lo leemos del query param porque es un GET simple para descarga
+    await registrarMovimiento(actionUser, 'Mantenimiento', 'BACKUP', 'Se generó y descargó una copia de la base de datos.');
+    res.download(path.join(__dirname, 'tienda.db'));
+});
 
 // CONFIGURACIÓN FRONTEND
 app.use(express.static(path.join(__dirname, 'dist')));
