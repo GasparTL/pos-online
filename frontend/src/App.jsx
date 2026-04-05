@@ -3,11 +3,15 @@ import './App.css'
 
 function App() {
 
-  // --- PERSISTENCIA: Recordar todo al apagar la PC ---
+  // --- PERSISTENCIA Y AUTENTICACIÓN ---
   const [isLoggedIn, setIsLoggedIn] = useState(() => localStorage.getItem('isLoggedIn') === 'true');
   const [activeView, setActiveView] = useState(() => localStorage.getItem('activeView') || 'dashboard');
   const [cart, setCart] = useState(() => JSON.parse(localStorage.getItem('currentCart')) || []);
-  const [currentUserRole, setCurrentUserRole] = useState('Administrador');
+  
+  // Estados para el Login Funcional y Setup
+  const [isSetupComplete, setIsSetupComplete] = useState(true);
+  const [loginData, setLoginData] = useState({ username: '', password: '' });
+  const [currentUser, setCurrentUser] = useState(() => JSON.parse(localStorage.getItem('currentUser')) || null);
 
   // --- ESTADOS DE CONFIGURACIÓN (Módulo 2) ---
   const [appName, setAppName] = useState('MI TIENDITA')
@@ -27,19 +31,21 @@ function App() {
 
   // --- LÓGICA MÓDULO 1 (USUARIOS Y PERMISOS) ---
   const defaultAdminPerms = { ventas: true, inventario: true, reportes: true, compras: true, usuarios: true, configuracion: true };
-  const [users, setUsers] = useState([
-    { id: 1, name: 'Dueño Principal', username: 'admin', role: 'Administrador', permissions: { ...defaultAdminPerms } }
-  ])
+  const [users, setUsers] = useState([])
   
   const [newUser, setNewUser] = useState({
     name: '', username: '', password: '', role: 'Administrador', permissions: { ...defaultAdminPerms }
   })
 
+  const fetchUsers = async () => {
+    try {
+      const res = await fetch('http://localhost:5000/api/users');
+      if (res.ok) setUsers(await res.json());
+    } catch (e) { console.log("Error al cargar usuarios", e); }
+  }
+
   const handlePermissionChange = (perm) => {
-    setNewUser({
-      ...newUser,
-      permissions: { ...newUser.permissions, [perm]: !newUser.permissions[perm] }
-    })
+    setNewUser({ ...newUser, permissions: { ...newUser.permissions, [perm]: !newUser.permissions[perm] } })
   }
 
   const handleRoleChange = (e) => {
@@ -57,24 +63,134 @@ function App() {
     setNewUser({ ...newUser, role, permissions: perms });
   }
 
-  const handleCreateUser = (e) => {
+  const handleCreateUser = async (e) => {
     e.preventDefault()
     if (!newUser.name || !newUser.username || !newUser.password) {
       alert("Por favor, llena todos los datos del usuario."); return;
     }
-    setUsers([...users, { ...newUser, id: Date.now() }]);
-    setNewUser({ name: '', username: '', password: '', role: 'Administrador', permissions: { ...defaultAdminPerms } });
-    alert(`¡Usuario ${newUser.name} creado con éxito!`);
+    
+    // Si estamos en Setup Inicial
+    if (!isSetupComplete) {
+      try {
+        const res = await fetch('http://localhost:5000/api/system/setup', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newUser)
+        });
+        if (res.ok) {
+          alert("¡Primer Administrador creado! Ahora puedes iniciar sesión.");
+          setIsSetupComplete(true);
+          setNewUser({ name: '', username: '', password: '', role: 'Administrador', permissions: { ...defaultAdminPerms } });
+        } else {
+          const data = await res.json(); alert(data.error);
+        }
+      } catch (e) { alert("Error al conectar con el servidor.",e);}
+      return;
+    }
+
+    // Creación normal (Solo Admin)
+    if (currentUser?.role !== 'Administrador') return alert("Solo un Administrador puede crear usuarios.");
+    
+    try {
+      const res = await fetch('http://localhost:5000/api/users', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newUser)
+      });
+      if (res.ok) {
+        alert(`¡Usuario ${newUser.name} creado con éxito!`);
+        fetchUsers();
+        setNewUser({ name: '', username: '', password: '', role: 'Administrador', permissions: { ...defaultAdminPerms } });
+      } else {
+        const data = await res.json(); alert(data.error);
+      }
+    } catch (e) { alert("Error al crear usuario."),e; }
   }
 
-  // --- BASE DE DATOS ---
-  const [inventory, setInventory] = useState([
-    { sku: '750123456789', name: 'Leche Entera 1L', category: 'Lácteos', stock: 24, costPrice: 21.50, salePrice: 28.00, expiry: '2026-05-15', image: '' },
-    { sku: '200000000001', name: 'Jamón de Pavo 250g', category: 'Carnes', stock: 8, costPrice: 35.00, salePrice: 45.50, expiry: '2026-04-10', image: '' }
-  ])
+  const handleDeleteUser = async (id) => {
+    if (currentUser?.role !== 'Administrador') return alert("Solo un Administrador puede eliminar usuarios.");
+    if (currentUser?.id === id) return alert("No puedes eliminarte a ti mismo.");
+    if (!window.confirm("¿Estás seguro de eliminar este usuario?")) return;
 
+    try {
+      const res = await fetch(`http://localhost:5000/api/users/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        alert("Usuario eliminado.");
+        fetchUsers();
+      }
+    } catch (e) { alert("Error al eliminar usuario."),e; }
+  }
+
+  const handleLoginSubmit = async (e) => {
+    e.preventDefault();
+    try {
+      const res = await fetch('http://localhost:5000/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(loginData)
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setCurrentUser(data);
+        setIsLoggedIn(true);
+        localStorage.setItem('currentUser', JSON.stringify(data));
+        setLoginData({ username: '', password: '' });
+      } else {
+        alert(data.error);
+      }
+    } catch (e) { alert("Error de conexión. ¿El servidor está encendido?",e)}
+  }
+
+  const handleLogout = () => {
+    setIsLoggedIn(false);
+    setCurrentUser(null);
+    setActiveView('dashboard');
+    localStorage.removeItem('currentUser');
+    localStorage.removeItem('isLoggedIn');
+  }
+
+  // --- EFECTOS INICIALES ---
+  useEffect(() => {
+    fetch('http://localhost:5000/api/system/check-setup')
+      .then(res => res.json())
+      .then(data => setIsSetupComplete(data.isSetupComplete))
+      .catch(() => console.log("Esperando servidor..."));
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('isLoggedIn', isLoggedIn);
+    localStorage.setItem('activeView', activeView);
+    localStorage.setItem('currentCart', JSON.stringify(cart));
+  }, [isLoggedIn, activeView, cart]);
+
+useEffect(() => {
+    fetch('http://localhost:5000/api/system/check-setup')
+      .then(res => res.json())
+      .then(data => setIsSetupComplete(data.isSetupComplete))
+      .catch(() => console.log("Esperando servidor..."));
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('isLoggedIn', isLoggedIn);
+    localStorage.setItem('activeView', activeView);
+    localStorage.setItem('currentCart', JSON.stringify(cart));
+  }, [isLoggedIn, activeView, cart]);
+const [inventory, setInventory] = useState([])
+  const [salesHistory, setSalesHistory] = useState([]);
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const resP = await fetch('http://localhost:5000/api/products');
+        setInventory(await resP.json()); // 🟢 Ahora sí existe cuando llega aquí
+        
+        const resS = await fetch('http://localhost:5000/api/sales');
+        setSalesHistory(await resS.json()); // 🟢 Y esta también
+
+        fetchUsers();
+      } catch (e) { console.log("Servidor no conectado.", e); }
+    };
+    if (isLoggedIn) fetchData();
+  }, [isLoggedIn]);
+
+  // --- BASE DE DATOS Y ESTADOS GLOBALES ---
+  
   const [categories, setCategories] = useState(['Lácteos', 'Carnes', 'Abarrotes', 'Bebidas'])
 
+  
   // --- LÓGICA MÓDULO 4 (TICKETS Y COMPRAS) ---
   const [ticketTab, setTicketTab] = useState('captura')
   const [ticketItems, setTicketItems] = useState([])
@@ -205,14 +321,18 @@ function App() {
     setEditForm({ ...product })
   }
 
-  const handleSaveProductEdit = (e) => {
+  const handleSaveProductEdit = async (e) => {
     e.preventDefault()
     if(!editForm) return;
-    const updatedInventory = inventory.map(prod => prod.sku === editForm.sku ? editForm : prod)
-    setInventory(updatedInventory)
-    setFormMode('idle')
-    setEditForm(null)
-    alert('Información del producto actualizada correctamente.')
+    try {
+      const res = await fetch('http://localhost:5000/api/products', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(editForm)
+      });
+      if(res.ok) {
+        setInventory(inventory.map(prod => prod.sku === editForm.sku ? editForm : prod));
+        setFormMode('idle'); setEditForm(null); alert('Producto actualizado.');
+      }
+    } catch(e) { alert("Error al guardar en BD",e); }
   }
 
   const handleAddNewCategory = (e) => {
@@ -227,7 +347,7 @@ function App() {
     alert(`Categoría "${newCatName}" agregada con éxito.`)
   }
 
-  const handleSaveNewManualProduct = (e) => {
+  const handleSaveNewManualProduct = async (e) => {
     e.preventDefault()
     if(!newManualProduct.sku || !newManualProduct.name) {
       alert("El SKU y el Nombre son obligatorios."); return;
@@ -237,19 +357,24 @@ function App() {
       alert("Ya existe un producto con este SKU."); return;
     }
 
-    setInventory([
-      ...inventory, 
-      {
-        ...newManualProduct,
-        stock: Number(newManualProduct.stock),
-        costPrice: Number(newManualProduct.costPrice),
-        salePrice: Number(newManualProduct.salePrice)
+    const productToSave = {
+      ...newManualProduct,
+      stock: Number(newManualProduct.stock),
+      costPrice: Number(newManualProduct.costPrice),
+      salePrice: Number(newManualProduct.salePrice)
+    };
+
+    try {
+      const res = await fetch('http://localhost:5000/api/products', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(productToSave)
+      });
+      if(res.ok) {
+        setInventory([...inventory, productToSave]);
+        setFormMode('idle'); 
+        setNewManualProduct({sku: '', name: '', category: 'Por clasificar', stock: 1, costPrice: '', salePrice: '', expiry: '', image: ''});
+        alert('Producto agregado.');
       }
-    ])
-    
-    setFormMode('idle')
-    setNewManualProduct({sku: '', name: '', category: 'Por clasificar', stock: 1, costPrice: '', salePrice: '', expiry: '', image: ''})
-    alert('Producto manual agregado al inventario.')
+    } catch(e) { alert("Error al guardar en BD",e); }
   }
 
   const totalStockItems = inventory.reduce((sum, p) => sum + p.stock, 0)
@@ -267,33 +392,7 @@ function App() {
   const [checkoutModal, setCheckoutModal] = useState(false)
   const [paymentData, setPaymentData] = useState({ method: 'efectivo', cashGiven: '', cardCommissionPct: 3 })
   const [saleTicket, setSaleTicket] = useState(null)
-  
-  const [salesHistory, setSalesHistory] = useState([
-    { id: 'VTA-0001', date: new Date().toISOString(), displayDate: new Date().toLocaleDateString(), subtotal: 91.00, commission: 0, total: 91.00, profit: 21.00, method: 'efectivo', items: [] }
-  ])
 
-  // --- EFECTOS AÑADIDOS PARA CONEXIÓN Y LOCALSTORAGE ---
-  useEffect(() => {
-    localStorage.setItem('isLoggedIn', isLoggedIn);
-    localStorage.setItem('activeView', activeView);
-    localStorage.setItem('currentCart', JSON.stringify(cart));
-  }, [isLoggedIn, activeView, cart]);
-
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const resP = await fetch('http://localhost:5000/api/products');
-        setInventory(await resP.json());
-        
-        const resS = await fetch('http://localhost:5000/api/sales');
-        setSalesHistory(await resS.json());
-      } catch (e) { console.log("Servidor no conectado.", e); }
-    };
-    if (isLoggedIn) fetchData();
-  }, [isLoggedIn]);
-
-
-  // --- FUNCIONES DE BASE DE DATOS (NUEVAS) ---
   const handleDbInitialize = async () => {
     try {
       const res = await fetch('http://localhost:5000/api/db/initialize', { method: 'POST' });
@@ -409,7 +508,6 @@ function App() {
         setCart([]);
         setCheckoutModal(false);
         setPaymentData({ method: 'efectivo', cashGiven: '', cardCommissionPct: 3 }); 
-        alert("Venta guardada en Base de Datos.");
       } else {
         alert("Hubo un problema al procesar la venta en el servidor.");
       }
@@ -422,7 +520,7 @@ function App() {
   const [adjustData, setAdjustData] = useState({ sku: '', type: 'salida', qty: 1, reason: 'Merma / Dañado' })
   const [adjustmentHistory, setAdjustmentHistory] = useState([])
 
-  const handleApplyAdjustment = (e) => {
+  const handleApplyAdjustment = async (e) => {
     e.preventDefault()
     if (!adjustData.sku || adjustData.qty <= 0) {
       alert("Por favor ingresa un SKU válido y una cantidad mayor a 0.")
@@ -449,23 +547,30 @@ function App() {
 
     updatedInventory[prodIndex].stock = newStock
 
-    const newRecord = {
-      dateISO: new Date().toISOString(),
-      date: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(),
-      sku: adjustData.sku,
-      name: updatedInventory[prodIndex].name,
-      type: adjustData.type,
-      qty: adjustData.qty,
-      reason: adjustData.reason,
-      unitCost: updatedInventory[prodIndex].costPrice, 
-      oldStock: currentStock,
-      newStock: newStock
-    }
+    try {
+      const res = await fetch('http://localhost:5000/api/products', { 
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedInventory[prodIndex]) 
+      });
+      if (res.ok) {
+        const newRecord = {
+          dateISO: new Date().toISOString(),
+          date: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(),
+          sku: adjustData.sku,
+          name: updatedInventory[prodIndex].name,
+          type: adjustData.type,
+          qty: adjustData.qty,
+          reason: adjustData.reason,
+          unitCost: updatedInventory[prodIndex].costPrice, 
+          oldStock: currentStock,
+          newStock: newStock
+        }
 
-    setInventory(updatedInventory)
-    setAdjustmentHistory([newRecord, ...adjustmentHistory])
-    setAdjustData({ sku: '', type: 'salida', qty: 1, reason: 'Merma / Dañado' })
-    alert("¡Ajuste de inventario aplicado correctamente!")
+        setInventory(updatedInventory)
+        setAdjustmentHistory([newRecord, ...adjustmentHistory])
+        setAdjustData({ sku: '', type: 'salida', qty: 1, reason: 'Merma / Dañado' })
+        alert("¡Ajuste de inventario aplicado correctamente!")
+      }
+    } catch { alert("Error al guardar ajuste."); }
   }
 
   // --- LÓGICA MÓDULO 7 (REPORTES FINANCIEROS) ---
@@ -515,7 +620,7 @@ function App() {
     csvContent += "DESGLOSE DE VENTAS DEL PERIODO\nID Ticket,Fecha,Metodo de Pago,Subtotal,Comision Bancaria,Total Pagado,Utilidad Neta\n";
     filteredSales.forEach(sale => {
       const cleanMethod = sale.method.replace(/,/g, '');
-      csvContent += `${sale.id},${sale.displayDate},${cleanMethod},${sale.subtotal.toFixed(2)},${sale.commission.toFixed(2)},${sale.total.toFixed(2)},${sale.profit.toFixed(2)}\n`;
+      csvContent += `${sale.id},${sale.displayDate || sale.date},${cleanMethod},${sale.subtotal.toFixed(2)},${sale.commission.toFixed(2)},${sale.total.toFixed(2)},${sale.profit.toFixed(2)}\n`;
     });
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -578,7 +683,7 @@ function App() {
     window.open(waUrl, '_blank');
   }
 
-  const handleCompleteWaOrder = (orderId) => {
+  const handleCompleteWaOrder = async (orderId) => {
     const orderIndex = waOrders.findIndex(o => o.id === orderId);
     const order = waOrders[orderIndex];
     
@@ -599,8 +704,6 @@ function App() {
       return;
     }
 
-    setInventory(updatedInventory);
-
     const cartTotalCost = order.items.reduce((sum, item) => sum + (item.costPrice * item.qty), 0);
     const saleProfit = order.total - cartTotalCost;
 
@@ -618,46 +721,24 @@ function App() {
       change: 0
     };
 
-    setSalesHistory([newTicket, ...salesHistory]);
+    try {
+      const res = await fetch('http://localhost:5000/api/sales', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newTicket)
+      });
 
-    const newWaOrders = waOrders.filter(o => o.id !== orderId);
-    setWaOrders(newWaOrders);
-    
-    alert(`¡Pedido ${order.id} completado con éxito! Inventario actualizado y venta registrada.`);
+      if (res.ok) {
+        setSalesHistory([newTicket, ...salesHistory]);
+        setInventory(updatedInventory);
+        const newWaOrders = waOrders.filter(o => o.id !== orderId);
+        setWaOrders(newWaOrders);
+        alert(`¡Pedido ${order.id} completado con éxito! Inventario actualizado y venta registrada.`);
+      }
+    } catch { alert("Error al registrar venta en el servidor."); }
   }
 
   const handleRejectWaOrder = (orderId) => {
     const newWaOrders = waOrders.filter(o => o.id !== orderId);
     setWaOrders(newWaOrders);
-  }
-
-  // --------------------------------------------------------
-  // PANTALLAS DE LOGIN Y DASHBOARD
-  // --------------------------------------------------------
-  if (!isLoggedIn) {
-    return (
-      <div className="login-container" style={themeStyles}>
-        <div className="login-card">
-          <div className="brand-panel">
-            <h1>POS VENTA<br/>{appName}</h1><p className="slogan">FÁCIL, RÁPIDO Y ORDENADO</p>
-            <div className="company-info"><h3>Nuestra Misión</h3><p>Es brindar a nuestros usuarios el orden para sus negocios.</p><h3>Nuestra Visión</h3><p>Es llegar y facilitar el negocio de los usuarios de una tiendita.</p></div>
-          </div>
-          <div className="login-panel">
-            <h2>Acceso al Sistema</h2>
-            <div className="input-group"><label>Usuario / Correo</label><input type="text" placeholder="Ingresa tu usuario" /></div>
-            <div className="input-group"><label>Contraseña</label><input type="password" placeholder="••••••••" /></div>
-            <div className="action-buttons">
-              <button className="btn-primary" onClick={() => {
-                setIsLoggedIn(true);
-                setCurrentUserRole('Administrador'); 
-              }}>Ingresar</button>
-              <button className="btn-secondary">Registrarte</button>
-            </div>
-            <button className="btn-text" style={{marginTop: '1rem', background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', textDecoration: 'underline'}}>¿Has olvidado tu contraseña?</button>
-          </div>
-        </div>
-      </div>
-    )
   }
 
   const notificationBadgeStyle = {
@@ -667,25 +748,84 @@ function App() {
     fontWeight: 'bold', fontSize: '0.9rem', boxShadow: '0 4px 6px rgba(0,0,0,0.1)'
   };
 
+
+  // --------------------------------------------------------
+  // PANTALLAS DE LOGIN Y DASHBOARD
+  // --------------------------------------------------------
+  if (!isLoggedIn) {
+    if (!isSetupComplete) {
+      return (
+        <div className="login-container" style={themeStyles}>
+          <div className="login-card">
+             <div className="brand-panel">
+               <h1>BIENVENIDO A<br/>{appName}</h1><p className="slogan">CONFIGURACIÓN INICIAL</p>
+               <p style={{marginTop: '2rem'}}>Al parecer es la primera vez que abres el sistema. Registra al Administrador Principal para comenzar.</p>
+             </div>
+             <div className="login-panel">
+               <h2>Crear Administrador</h2>
+               <form onSubmit={handleCreateUser}>
+                 <div className="input-group"><label>Nombre Real</label><input type="text" value={newUser.name} onChange={e => setNewUser({...newUser, name: e.target.value})} required/></div>
+                 <div className="input-group"><label>Nombre de Usuario</label><input type="text" value={newUser.username} onChange={e => setNewUser({...newUser, username: e.target.value})} required/></div>
+                 <div className="input-group"><label>Contraseña Maestra</label><input type="password" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} required/></div>
+                 <button type="submit" className="btn-primary full-width" style={{marginTop: '1rem'}}>Crear y Continuar</button>
+               </form>
+             </div>
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div className="login-container" style={themeStyles}>
+        <div className="login-card">
+          <div className="brand-panel">
+            <h1>POS VENTA<br/>{appName}</h1><p className="slogan">FÁCIL, RÁPIDO Y ORDENADO</p>
+            <div className="company-info"><h3>Nuestra Misión</h3><p>Es brindar a nuestros usuarios el orden para sus negocios.</p><h3>Nuestra Visión</h3><p>Es llegar y facilitar el negocio de los usuarios de una tiendita.</p></div>
+          </div>
+          <div className="login-panel">
+            <h2>Acceso al Sistema</h2>
+            <form onSubmit={handleLoginSubmit}>
+              <div className="input-group"><label>Usuario / Correo</label><input type="text" placeholder="Ingresa tu usuario" value={loginData.username} onChange={e => setLoginData({...loginData, username: e.target.value})} required /></div>
+              <div className="input-group"><label>Contraseña</label><input type="password" placeholder="••••••••" value={loginData.password} onChange={e => setLoginData({...loginData, password: e.target.value})} required /></div>
+              <div className="action-buttons">
+                <button type="submit" className="btn-primary">Ingresar</button>
+                <button type="button" className="btn-secondary">Registrarte</button>
+              </div>
+            </form>
+            <button className="btn-text" style={{marginTop: '1rem', background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', textDecoration: 'underline'}}>¿Has olvidado tu contraseña?</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   if (isLoggedIn && activeView === 'dashboard') {
     return (
       <div className="dashboard-container" style={themeStyles}>
-        <header className="header"><h1>Panel de Control - {appName}</h1><button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button></header>
+        <header className="header">
+          <h1>Panel de Control - {appName}</h1>
+          <div style={{display:'flex', alignItems:'center', gap:'1rem'}}>
+            <span>👤 Hola, <strong>{currentUser?.name}</strong></span>
+            <button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button>
+          </div>
+        </header>
         <main className="dashboard-content">
           <h2 className="dashboard-title">Selecciona un módulo</h2>
           <div className="grid-menu">
-            <div className="module-card" onClick={() => setActiveView('usuarios')}><div className="icon">👥</div><h3>1. Usuarios</h3><p>Administrador y empleados</p></div>
-            <div className="module-card" onClick={() => setActiveView('configuracion')}><div className="icon">🎨</div><h3>2. Editar Interfaz / BD</h3><p>Configuración y Base de Datos</p></div>
-            <div className="module-card" onClick={() => setActiveView('proveedores')}><div className="icon">🚚</div><h3>3. Proveedores</h3><p>Alta y baja de surtidores</p></div>
-            <div className="module-card" onClick={() => setActiveView('tickets')}><div className="icon">🧾</div><h3>4. Registro Contable</h3><p>Control de tickets de proveedores</p></div>
-            <div className="module-card" onClick={() => setActiveView('inventario')}><div className="icon">📦</div><h3>5. Registro Productos</h3><p>Categorías, ingresos y caducidad</p></div>
-            <div className="module-card highlight" onClick={() => setActiveView('ventas')} style={{borderColor: 'var(--accent-color)', borderWidth: '2px'}}><div className="icon">💰</div><h3>6. Punto de Venta</h3><p>Calculadora, escáner y cobro</p></div>
-            <div className="module-card" onClick={() => setActiveView('reportes')}><div className="icon">📊</div><h3>7. Reportes</h3><p>Cortes diarios, semanales y mensuales</p></div>
-            <div className="module-card whatsapp" onClick={() => setActiveView('whatsapp')} style={{position: 'relative', border: waOrders.length > 0 ? '2px solid #22c55e' : ''}}>
-              {waOrders.length > 0 && <div style={notificationBadgeStyle}>{waOrders.length}</div>}
-              <div className="icon">📱</div><h3>8. Pedidos WhatsApp</h3><p>Notificaciones y carrito en línea</p>
-            </div>
-            <div className="module-card" onClick={() => setActiveView('control_inventario')}><div className="icon">📋</div><h3>9. Control Inventario</h3><p>Ajustes físicos, mermas y kardex</p></div>
+            {currentUser?.permissions?.usuarios && <div className="module-card" onClick={() => setActiveView('usuarios')}><div className="icon">👥</div><h3>1. Usuarios</h3><p>Administrador y empleados</p></div>}
+            {currentUser?.permissions?.configuracion && <div className="module-card" onClick={() => setActiveView('configuracion')}><div className="icon">🎨</div><h3>2. Editar Interfaz / BD</h3><p>Configuración y Base de Datos</p></div>}
+            {currentUser?.permissions?.compras && <div className="module-card" onClick={() => setActiveView('proveedores')}><div className="icon">🚚</div><h3>3. Proveedores</h3><p>Alta y baja de surtidores</p></div>}
+            {currentUser?.permissions?.compras && <div className="module-card" onClick={() => setActiveView('tickets')}><div className="icon">🧾</div><h3>4. Registro Contable</h3><p>Control de tickets de proveedores</p></div>}
+            {currentUser?.permissions?.inventario && <div className="module-card" onClick={() => setActiveView('inventario')}><div className="icon">📦</div><h3>5. Registro Productos</h3><p>Categorías, ingresos y caducidad</p></div>}
+            {currentUser?.permissions?.ventas && <div className="module-card highlight" onClick={() => setActiveView('ventas')} style={{borderColor: 'var(--accent-color)', borderWidth: '2px'}}><div className="icon">💰</div><h3>6. Punto de Venta</h3><p>Calculadora, escáner y cobro</p></div>}
+            {currentUser?.permissions?.reportes && <div className="module-card" onClick={() => setActiveView('reportes')}><div className="icon">📊</div><h3>7. Reportes</h3><p>Cortes diarios, semanales y mensuales</p></div>}
+            {currentUser?.permissions?.ventas && (
+              <div className="module-card whatsapp" onClick={() => setActiveView('whatsapp')} style={{position: 'relative', border: waOrders.length > 0 ? '2px solid #22c55e' : ''}}>
+                {waOrders.length > 0 && <div style={notificationBadgeStyle}>{waOrders.length}</div>}
+                <div className="icon">📱</div><h3>8. Pedidos WhatsApp</h3><p>Notificaciones y carrito en línea</p>
+              </div>
+            )}
+            {currentUser?.permissions?.inventario && <div className="module-card" onClick={() => setActiveView('control_inventario')}><div className="icon">📋</div><h3>9. Control Inventario</h3><p>Ajustes físicos, mermas y kardex</p></div>}
           </div>
         </main>
       </div>
@@ -701,37 +841,51 @@ function App() {
         <header className="header">
           <button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button>
           <h1>Gestión de Usuarios y Permisos</h1>
-          <button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button>
+          <button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button>
         </header>
         <main className="main-content" style={{gap: '2rem'}}>
-          <section className="form-section" style={{flex: 1}}>
-            <h2>Registrar Nuevo Empleado</h2>
-            <form className="custom-form" onSubmit={handleCreateUser}>
-              <div className="input-group"><label>Nombre Completo</label><input type="text" value={newUser.name} onChange={e => setNewUser({...newUser, name: e.target.value})} required/></div>
-              <div className="input-group"><label>Usuario</label><input type="text" value={newUser.username} onChange={e => setNewUser({...newUser, username: e.target.value})} required/></div>
-              <div className="input-group"><label>Contraseña</label><input type="password" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} required/></div>
-              <div className="input-group"><label>Rol Inicial</label><select className="role-select" value={newUser.role} onChange={handleRoleChange}><option value="Administrador">Administrador</option><option value="Vendedor">Vendedor</option><option value="Cajero">Cajero</option></select></div>
-              <div style={{marginTop: '1.5rem', background: '#f8fafc', padding: '1.5rem', borderRadius: '8px', border: '1px solid var(--border-color)'}}>
-                <h3 style={{fontSize: '0.9rem', color: 'var(--primary-color)', marginBottom: '1rem', textTransform: 'uppercase'}}>Permisos y Accesos Habilitados</h3>
-                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem'}}>
-                  <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.ventas} onChange={() => handlePermissionChange('ventas')} /> 💰 Punto de Venta</label>
-                  <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.inventario} onChange={() => handlePermissionChange('inventario')} /> 📦 Inventario</label>
-                  <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.reportes} onChange={() => handlePermissionChange('reportes')} /> 📊 Reportes</label>
-                  <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.compras} onChange={() => handlePermissionChange('compras')} /> 🧾 Compras / Prov.</label>
-                  <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.usuarios} onChange={() => handlePermissionChange('usuarios')} /> 👥 Usuarios</label>
-                  <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.configuracion} onChange={() => handlePermissionChange('configuracion')} /> 🎨 Configuración</label>
+          
+          {currentUser?.role === 'Administrador' ? (
+            <section className="form-section" style={{flex: 1}}>
+              <h2>Registrar Nuevo Empleado</h2>
+              <form className="custom-form" onSubmit={handleCreateUser}>
+                <div className="input-group"><label>Nombre Completo</label><input type="text" value={newUser.name} onChange={e => setNewUser({...newUser, name: e.target.value})} required/></div>
+                <div className="input-group"><label>Usuario</label><input type="text" value={newUser.username} onChange={e => setNewUser({...newUser, username: e.target.value})} required/></div>
+                <div className="input-group"><label>Contraseña</label><input type="password" value={newUser.password} onChange={e => setNewUser({...newUser, password: e.target.value})} required/></div>
+                <div className="input-group"><label>Rol Inicial</label><select className="role-select" value={newUser.role} onChange={handleRoleChange}><option value="Administrador">Administrador</option><option value="Vendedor">Vendedor</option><option value="Cajero">Cajero</option></select></div>
+                <div style={{marginTop: '1.5rem', background: '#f8fafc', padding: '1.5rem', borderRadius: '8px', border: '1px solid var(--border-color)'}}>
+                  <h3 style={{fontSize: '0.9rem', color: 'var(--primary-color)', marginBottom: '1rem', textTransform: 'uppercase'}}>Permisos y Accesos Habilitados</h3>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem'}}>
+                    <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.ventas} onChange={() => handlePermissionChange('ventas')} /> 💰 Punto de Venta</label>
+                    <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.inventario} onChange={() => handlePermissionChange('inventario')} /> 📦 Inventario</label>
+                    <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.reportes} onChange={() => handlePermissionChange('reportes')} /> 📊 Reportes</label>
+                    <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.compras} onChange={() => handlePermissionChange('compras')} /> 🧾 Compras / Prov.</label>
+                    <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.usuarios} onChange={() => handlePermissionChange('usuarios')} /> 👥 Usuarios</label>
+                    <label style={{display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', cursor: 'pointer'}}><input type="checkbox" checked={newUser.permissions.configuracion} onChange={() => handlePermissionChange('configuracion')} /> 🎨 Configuración</label>
+                  </div>
                 </div>
-              </div>
-              <button type="submit" className="btn-primary full-width" style={{marginTop: '1.5rem'}}>Guardar Usuario</button>
-            </form>
-          </section>
+                <button type="submit" className="btn-primary full-width" style={{marginTop: '1.5rem'}}>Guardar Usuario</button>
+              </form>
+            </section>
+          ) : (
+            <section className="form-section" style={{flex: 1, display:'flex', alignItems:'center', justifyContent:'center'}}>
+              <h2 style={{color:'#64748b', textAlign: 'center'}}>🔒 Solo un Administrador puede registrar nuevos usuarios.</h2>
+            </section>
+          )}
+
           <aside className="list-section" style={{flex: 1}}>
             <h2>Directorio del Personal</h2>
             <div className="user-list" style={{display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1.5rem'}}>
               {users.map(user => (
                 <div key={user.id} style={{background: 'white', padding: '1rem', borderRadius: '8px', border: `1px solid ${user.role === 'Administrador' ? 'var(--accent-color)' : 'var(--border-color)'}`, display: 'flex', alignItems: 'center', gap: '1rem', boxShadow: 'var(--shadow-sm)'}}>
                   <div style={{fontSize: '2.5rem', background: '#f1f5f9', borderRadius: '50%', padding: '0.5rem', width: '60px', height: '60px', display: 'flex', alignItems: 'center', justifyContent: 'center'}}>{user.role === 'Administrador' ? '👑' : '👤'}</div>
-                  <div><h4 style={{color: 'var(--primary-color)', fontSize: '1.1rem'}}>{user.name}</h4><p style={{fontSize: '0.9rem', color: '#64748b'}}>@{user.username} | <strong style={{color: user.role === 'Administrador' ? 'var(--accent-color)' : 'inherit'}}>{user.role}</strong></p></div>
+                  <div style={{flex: 1}}>
+                    <h4 style={{color: 'var(--primary-color)', fontSize: '1.1rem'}}>{user.name}</h4>
+                    <p style={{fontSize: '0.9rem', color: '#64748b'}}>@{user.username} | <strong style={{color: user.role === 'Administrador' ? 'var(--accent-color)' : 'inherit'}}>{user.role}</strong></p>
+                  </div>
+                  {currentUser?.role === 'Administrador' && user.id !== currentUser.id && (
+                    <button className="btn-icon delete" onClick={() => handleDeleteUser(user.id)}>🗑️</button>
+                  )}
                 </div>
               ))}
             </div>
@@ -750,7 +904,7 @@ function App() {
         <header className="header">
           <button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button>
           <h1>Registro de Productos</h1>
-          <button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button>
+          <button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button>
         </header>
 
         <main className="main-content" style={{flexDirection: 'column', alignItems: 'center', overflowY: 'auto'}}>
@@ -1010,7 +1164,7 @@ function App() {
         <header className="header">
           <button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button>
           <h1>Caja Registradora</h1>
-          <button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button>
+          <button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button>
         </header>
 
         <main className="main-content" style={{gap: '2rem'}}>
@@ -1086,7 +1240,7 @@ function App() {
         <header className="header">
           <button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button>
           <h1>Gestión de Pedidos Online</h1>
-          <button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button>
+          <button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button>
         </header>
 
         <main className="main-content" style={{flexDirection: 'column', alignItems: 'center', overflowY: 'auto'}}>
@@ -1194,7 +1348,7 @@ function App() {
         <header className="header">
           <button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button>
           <h1>Configuración del Sistema</h1>
-          <button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button>
+          <button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button>
         </header>
         
         <main className="main-content" style={{flexDirection: 'column'}}>
@@ -1226,7 +1380,7 @@ function App() {
           </div>
 
           {/* ZONA DE PELIGRO - GESTIÓN DE DB ACTUALIZADA */}
-          {currentUserRole === 'Administrador' && (
+          {currentUser?.role === 'Administrador' && (
             <section className="form-section" style={{border: '2px solid #ef4444', backgroundColor: '#fff', width: '100%', marginTop: '2rem' }}>
               <h2 style={{color: '#ef4444', textAlign: 'center'}}>⚠️ Zona de Peligro: Gestión de Base de Datos</h2>
               <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginTop: '1.5rem'}}>
@@ -1249,7 +1403,7 @@ function App() {
   if (isLoggedIn && activeView === 'reportes') {
     return (
       <div className="pos-container" style={themeStyles}>
-        <header className="header"><button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button><h1>Reportes Financieros</h1><button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button></header>
+        <header className="header"><button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button><h1>Reportes Financieros</h1><button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button></header>
         <main className="main-content" style={{flexDirection: 'column', alignItems: 'center', overflowY: 'auto'}}>
           <div className="module-tabs" style={{maxWidth: '1000px', margin: '0 auto 2rem auto', display: 'flex', gap: '1rem', alignItems: 'center', padding: '0.5rem 1rem'}}>
             <div style={{display: 'flex', flex: 1, gap: '0.5rem'}}><button className={`tab-btn ${reportPeriod === 'hoy' ? 'active' : ''}`} onClick={() => setReportPeriod('hoy')}>📅 Hoy</button><button className={`tab-btn ${reportPeriod === 'semana' ? 'active' : ''}`} onClick={() => setReportPeriod('semana')}>📅 Semana</button><button className={`tab-btn ${reportPeriod === 'mes' ? 'active' : ''}`} onClick={() => setReportPeriod('mes')}>📅 Mes</button><button className={`tab-btn ${reportPeriod === 'anio' ? 'active' : ''}`} onClick={() => setReportPeriod('anio')}>📅 Año</button></div>
@@ -1275,7 +1429,7 @@ function App() {
   if (isLoggedIn && activeView === 'proveedores') {
     return (
       <div className="pos-container" style={themeStyles}>
-        <header className="header"><button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button><h1>Directorio de Proveedores</h1><button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button></header>
+        <header className="header"><button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button><h1>Directorio de Proveedores</h1><button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button></header>
         <main className="main-content">
           <section className="form-section"><h2>Alta de Proveedor</h2><form className="custom-form" onSubmit={(e) => e.preventDefault()}><div className="input-group"><label>Empresa</label><input type="text" /></div><div className="input-group"><label>R.F.C.</label><input type="text" style={{ textTransform: 'uppercase' }} /></div><button className="btn-primary full-width">Guardar Proveedor</button></form></section>
           <aside className="list-section" style={{flex: 2}}><h2>Proveedores Registrados</h2><div className="table-container"><table className="data-table"><thead><tr><th>Empresa</th><th>RFC</th></tr></thead><tbody><tr><td>Coca-Cola FEMSA</td><td>KOF930408TK1</td></tr></tbody></table></div></aside>
@@ -1288,7 +1442,7 @@ function App() {
     return (
       <div className="pos-container" style={themeStyles}>
         {renderTicketModal()}
-        <header className="header"><button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button><h1>Registro Contable de Compras</h1><button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button></header>
+        <header className="header"><button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button><h1>Registro Contable de Compras</h1><button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button></header>
         <main className="main-content" style={{flexDirection: 'column', alignItems: 'center', overflowY: 'auto'}}>
           <div className="module-tabs"><button className={`tab-btn ${ticketTab === 'captura' ? 'active' : ''}`} onClick={() => setTicketTab('captura')}>📝 Captura de Ticket</button><button className={`tab-btn ${ticketTab === 'historial' ? 'active' : ''}`} onClick={() => setTicketTab('historial')}>📊 Historial Completo</button></div>
           {ticketTab === 'captura' && (
@@ -1305,7 +1459,7 @@ function App() {
   if (isLoggedIn && activeView === 'control_inventario') {
     return (
       <div className="pos-container" style={themeStyles}>
-        <header className="header"><button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button><h1>Control de Inventario y Ajustes</h1><button className="logout-btn" onClick={() => setIsLoggedIn(false)}>Cerrar Sesión</button></header>
+        <header className="header"><button className="back-btn" onClick={() => setActiveView('dashboard')}>⬅ Volver al Menú</button><h1>Control de Inventario y Ajustes</h1><button className="logout-btn" onClick={handleLogout}>Cerrar Sesión</button></header>
         <main className="main-content" style={{gap: '2rem'}}>
           <section className="form-section" style={{flex: 1}}>
             <h2>Registrar Ajuste Físico</h2>
@@ -1340,5 +1494,4 @@ function App() {
   )
   
 }
-
 export default App
