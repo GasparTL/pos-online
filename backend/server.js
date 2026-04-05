@@ -5,6 +5,7 @@ const cors = require('cors');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const axios = require('axios');
+const fs = require('fs');
 
 const app = express();
 
@@ -87,8 +88,11 @@ const getActionUser = (req) => req.body.actionUser || req.headers['x-action-user
             CREATE TABLE IF NOT EXISTS tickets (id TEXT PRIMARY KEY, date TEXT, provider TEXT, items TEXT, subtotal REAL, iva REAL, total REAL);
             CREATE TABLE IF NOT EXISTS providers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, rfc TEXT);
             
-            -- Nueva tabla de auditoría
+            -- Tabla de auditoría
             CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, username TEXT, module TEXT, action TEXT, description TEXT, details TEXT);
+            
+            -- NUEVA TABLA DE CONFIGURACIÓN
+            CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
         `);
 
         const userCount = await db.get('SELECT COUNT(*) as count FROM users');
@@ -100,9 +104,18 @@ const getActionUser = (req) => req.body.actionUser || req.headers['x-action-user
                 `INSERT INTO users (name, username, password, role, permissions) VALUES ('Administrador Maestro', 'admin', ?, 'Administrador', ?)`,
                 [defaultHash, defaultPerms]
             );
-            console.log('👑 Usuario Maestro creado automáticamente. Usuario: admin | Clave: admin123');
+            console.log('👑 Usuario Maestro creado automáticamente. Usuario: **** | Clave: ********');
             
             await registrarMovimiento('Sistema', 'Sistema', 'INICIALIZACIÓN', 'Creación de usuario administrador maestro.');
+        }
+
+        // Insertar configuración por defecto si la tabla está vacía
+        const settingsCount = await db.get('SELECT COUNT(*) as count FROM settings');
+        if (settingsCount.count === 0) {
+            await db.run(`INSERT INTO settings (key, value) VALUES ('app_title', 'MI TIENDITA')`);
+            await db.run(`INSERT INTO settings (key, value) VALUES ('color_primary', '#1F2937')`);
+            await db.run(`INSERT INTO settings (key, value) VALUES ('color_accent', '#3B82F6')`);
+            console.log('🎨 Configuración visual por defecto inicializada.');
         }
 
         console.log('✅ Base de datos lista.');
@@ -314,7 +327,7 @@ app.delete('/api/tickets/:id', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// --- RUTAS DE AUDITORÍA (NUEVO) ---
+// --- RUTAS DE AUDITORÍA ---
 app.get('/api/audit', async (req, res) => {
     try {
         const logs = await db.all('SELECT * FROM audit_logs ORDER BY id DESC');
@@ -332,6 +345,41 @@ app.delete('/api/audit/clear', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- RUTAS DE CONFIGURACIÓN DEL SISTEMA (NUEVO) ---
+app.get('/api/settings', async (req, res) => {
+    try {
+        const rows = await db.all('SELECT * FROM settings');
+        const settings = {};
+        rows.forEach(row => settings[row.key] = row.value);
+        res.json(settings);
+    } catch (e) { 
+        res.status(500).json({ error: e.message }); 
+    }
+});
+
+app.post('/api/settings', async (req, res) => {
+    const { title, colorPrimary, colorAccent } = req.body;
+    const actionUser = getActionUser(req);
+    
+    try {
+        await db.run('BEGIN TRANSACTION');
+        
+        if (title) await db.run('UPDATE settings SET value = ? WHERE key = ?', [title, 'app_title']);
+        if (colorPrimary) await db.run('UPDATE settings SET value = ? WHERE key = ?', [colorPrimary, 'color_primary']);
+        if (colorAccent) await db.run('UPDATE settings SET value = ? WHERE key = ?', [colorAccent, 'color_accent']);
+        
+        await db.run('COMMIT');
+
+        // Registro en la bitácora
+        await registrarMovimiento(actionUser, 'Configuración', 'ACTUALIZAR_APARIENCIA', `Se actualizaron los ajustes visuales del sistema (Título/Colores).`);
+        
+        res.json({ success: true, message: 'Configuración guardada correctamente' });
+    } catch (e) { 
+        await db.run('ROLLBACK'); 
+        res.status(500).json({ error: e.message }); 
+    }
+});
+
 // --- MANTENIMIENTO ---
 app.post('/api/db/clear', async (req, res) => { 
     const actionUser = getActionUser(req);
@@ -345,9 +393,52 @@ app.post('/api/db/clear', async (req, res) => {
 });
 
 app.get('/api/db/backup', async (req, res) => {
-    const actionUser = req.query.actionUser || 'Sistema'; // Aquí lo leemos del query param porque es un GET simple para descarga
+    const actionUser = req.query.actionUser || 'Sistema';
     await registrarMovimiento(actionUser, 'Mantenimiento', 'BACKUP', 'Se generó y descargó una copia de la base de datos.');
     res.download(path.join(__dirname, 'tienda.db'));
+});
+
+// --- NUEVA RUTA PARA CARGAR/RESTAURAR BASE DE DATOS (.db) ---
+app.post('/api/db/upload', async (req, res) => {
+    const { dbData, actionUser } = req.body;
+    
+    try {
+        if (!dbData) return res.status(400).json({ error: 'No se enviaron datos del archivo.' });
+
+        // 1. Cerramos la conexión actual a la base de datos para liberar el archivo
+        if (db) {
+            await db.close();
+        }
+
+        // 2. Sobrescribimos el archivo tienda.db físico con los datos nuevos
+        const targetPath = path.join(__dirname, 'tienda.db');
+        fs.writeFileSync(targetPath, Buffer.from(dbData, 'base64'));
+
+        // 3. Volvemos a abrir la conexión con la nueva base de datos
+        db = await open({
+            filename: targetPath,
+            driver: sqlite3.Database
+        });
+        await db.exec('PRAGMA journal_mode = WAL;');
+
+        // 4. Intentamos registrar el movimiento en la nueva bitácora (si existe)
+        try {
+            await db.run(
+                `INSERT INTO audit_logs (timestamp, username, module, action, description, details) VALUES (?, ?, ?, ?, ?, ?)`,
+                [new Date().toISOString(), actionUser || 'Sistema', 'Mantenimiento', 'RESTAURAR_BD', 'El usuario restauró un archivo de base de datos externo.', '{}']
+            );
+        } catch (ignored) {} // Ignoramos el error si la DB que subiste es muy vieja y aún no tenía la tabla audit_logs
+
+        res.json({ success: true, message: 'Base de datos restaurada correctamente.' });
+    } catch (e) {
+        console.error('❌ Error al restaurar DB:', e);
+        res.status(500).json({ error: e.message });
+        
+        // Intento de reconexión de emergencia en caso de fallo
+        try {
+            db = await open({ filename: path.join(__dirname, 'tienda.db'), driver: sqlite3.Database });
+        } catch(err) {}
+    }
 });
 
 // CONFIGURACIÓN FRONTEND

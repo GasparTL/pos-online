@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react' // <--- AÑADE useRef
 import './App.css'
 
 // Helpers externos para generar IDs y evitar el error "impure function" del linter
@@ -8,6 +8,7 @@ const generateWaId = () => `WAPP-${Math.floor(Math.random() * 1000).toString().p
 
 function App() {
 
+  const fileInputRef = useRef(null);
   // --- PERSISTENCIA, AUTENTICACIÓN Y ESTADOS GLOBALES PRIMERO ---
   const [isLoggedIn, setIsLoggedIn] = useState(() => localStorage.getItem('isLoggedIn') === 'true');
   const [activeView, setActiveView] = useState(() => localStorage.getItem('activeView') || 'dashboard');
@@ -22,7 +23,7 @@ function App() {
   const [salesHistory, setSalesHistory] = useState([]);
   const [ticketHistory, setTicketHistory] = useState([]);
   const [users, setUsers] = useState([]);
-  const [providers, setProviders] = useState([]); // 🚀 NUEVO ESTADO GLOBAL
+  const [providers, setProviders] = useState([]); 
   
   // --- ESTADOS DE CONFIGURACIÓN (Módulo 2) ---
   const [appName, setAppName] = useState('MI TIENDITA')
@@ -35,6 +36,28 @@ function App() {
   const themeStyles = { '--primary-color': primaryColor, '--accent-color': accentColor }
 
   // --- EFECTOS (SIEMPRE DESPUÉS DE LOS ESTADOS) ---
+
+  // 🚀 NUEVO EFECTO: Obtener configuración visual apenas carga la app
+  useEffect(() => {
+    fetch('http://localhost:5000/api/settings')
+      .then(res => res.json())
+      .then(data => {
+        if (data.app_title) {
+          setAppName(data.app_title);
+          setTempAppName(data.app_title);
+        }
+        if (data.color_primary) {
+          setPrimaryColor(data.color_primary);
+          setTempPrimaryColor(data.color_primary);
+        }
+        if (data.color_accent) {
+          setAccentColor(data.color_accent);
+          setTempAccentColor(data.color_accent);
+        }
+      })
+      .catch(e => console.log("Servidor no conectado o sin configuración inicial.", e));
+  }, []);
+
   useEffect(() => {
     fetch('http://localhost:5000/api/system/check-setup')
       .then(res => res.json())
@@ -63,7 +86,6 @@ function App() {
         const resU = await fetch('http://localhost:5000/api/users');
         if (resU.ok) setUsers(await resU.json());
 
-        // 🚀 OBTENER PROVEEDORES AL INICIAR
         const resProv = await fetch('http://localhost:5000/api/providers');
         if (resProv.ok) setProviders(await resProv.json());
 
@@ -115,7 +137,8 @@ function App() {
     if (currentUser?.role !== 'Administrador') return alert("Solo un Administrador puede crear usuarios.");
     
     try {
-      const res = await fetch('http://localhost:5000/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newUser) });
+      const payload = { ...newUser, actionUser: currentUser.username };
+      const res = await fetch('http://localhost:5000/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       if (res.ok) {
         alert(`¡Usuario ${newUser.name} creado con éxito!`); fetchUsers();
         setNewUser({ name: '', username: '', password: '', role: 'Administrador', permissions: { ...defaultAdminPerms } });
@@ -128,7 +151,10 @@ function App() {
     if (currentUser?.id === id) return alert("No puedes eliminarte a ti mismo.");
     if (!window.confirm("¿Estás seguro de eliminar este usuario?")) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/users/${id}`, { method: 'DELETE' });
+      const res = await fetch(`http://localhost:5000/api/users/${id}`, { 
+          method: 'DELETE',
+          headers: { 'x-action-user': currentUser.username }
+      });
       if (res.ok) { alert("Usuario eliminado."); fetchUsers(); }
     } catch (e) { alert("Error al eliminar usuario.", e); }
   }
@@ -150,20 +176,82 @@ function App() {
     localStorage.removeItem('currentUser'); localStorage.removeItem('isLoggedIn');
   }
 
-  const handleSaveSettings = (e) => {
-    e.preventDefault()
-    setAppName(tempAppName); setPrimaryColor(tempPrimaryColor); setAccentColor(tempAccentColor); alert('¡Configuración guardada con éxito!')
+  // 🚀 LÓGICA MÓDULO 2 ACTUALIZADA (AJUSTES)
+  const handleSaveSettings = async (e) => {
+    e.preventDefault();
+    const payload = {
+      title: tempAppName,
+      colorPrimary: tempPrimaryColor,
+      colorAccent: tempAccentColor,
+      actionUser: currentUser?.username || 'Sistema'
+    };
+
+    try {
+      const res = await fetch('http://localhost:5000/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      if (res.ok) {
+        setAppName(tempAppName); 
+        setPrimaryColor(tempPrimaryColor); 
+        setAccentColor(tempAccentColor); 
+        alert('✅ ¡Configuración guardada en el servidor con éxito!');
+      } else {
+        alert('❌ Error al guardar configuración en el servidor.');
+      }
+    } catch (e) {
+      alert("Error de red al guardar la configuración.", e);
+    }
   }
 
   // --- ZONA DE BASE DE DATOS (MÓDULO CONFIG) ---
-  const handleDbInitialize = async () => {
-    try { const res = await fetch('http://localhost:5000/api/db/initialize', { method: 'POST' }); if (res.ok) { alert("✅ Base de datos cargada y lista."); window.location.reload(); } } catch (e) { alert("❌ Error al iniciar DB.", e);}
-  };
+ const handleDbUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    if (!window.confirm(`⚠️ ATENCIÓN: Estás a punto de reemplazar TODA la base de datos actual con el archivo "${file.name}". Perderás los datos actuales si no tienes respaldo. ¿Deseas continuar?`)) {
+      e.target.value = null; // Reseteamos el input
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = async () => {
+      // Extraemos solo el base64 de la cadena que genera FileReader
+      const base64Data = reader.result.split(',')[1];
+      
+      try {
+        const res = await fetch('http://localhost:5000/api/db/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dbData: base64Data, actionUser: currentUser?.username || 'Sistema' })
+        });
+        
+        if (res.ok) {
+          alert("✅ Base de datos restaurada correctamente. El sistema se reiniciará para cargar los nuevos datos.");
+          window.location.reload(); // Recarga la página para mostrar los nuevos datos
+        } else {
+          const err = await res.json();
+          alert("❌ Error al cargar la base de datos: " + err.error);
+        }
+      } catch(error) {
+        alert("Error de conexión al subir la BD.", error);
+      }
+    };
+    
+    e.target.value = null; // Reseteamos el input para poder subir el mismo archivo después si es necesario
+  }
 
   const handleDbClear = async () => {
     if (!window.confirm("⚠️ ¿Borrar TODO el inventario, ventas y tickets? (Usuarios y Proveedores NO se borrarán)")) return;
     try {
-      const res = await fetch('http://localhost:5000/api/db/clear', { method: 'POST' });
+      const res = await fetch('http://localhost:5000/api/db/clear', { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ actionUser: currentUser?.username || 'Sistema' })
+      });
       if (res.ok) { localStorage.removeItem('currentCart'); setCart([]); alert("✅ Sistema limpio."); window.location.reload(); }
     } catch (e) { alert("❌ Error al limpiar DB.", e); }
   };
@@ -175,7 +263,7 @@ function App() {
     } catch (e) { alert("❌ Error al guardar DB.", e); }
   };
 
-  // --- 🚀 NUEVO: LÓGICA MÓDULO PROVEEDORES ---
+  // --- LÓGICA MÓDULO PROVEEDORES ---
   const [newProvider, setNewProvider] = useState({ name: '', rfc: '' });
 
   const handleCreateProvider = async (e) => {
@@ -183,7 +271,7 @@ function App() {
     if (!newProvider.name) return alert("El nombre de la empresa es obligatorio.");
     try {
       const res = await fetch('http://localhost:5000/api/providers', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newProvider)
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...newProvider, actionUser: currentUser?.username })
       });
       if (res.ok) {
         alert("Proveedor agregado exitosamente.");
@@ -199,7 +287,10 @@ function App() {
   const handleDeleteProvider = async (id) => {
     if (!window.confirm("⚠️ ¿Eliminar este proveedor? Los tickets que ya tengan este proveedor se mantendrán intactos, pero no podrás crear nuevos tickets con él.")) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/providers/${id}`, { method: 'DELETE' });
+      const res = await fetch(`http://localhost:5000/api/providers/${id}`, { 
+          method: 'DELETE',
+          headers: { 'x-action-user': currentUser?.username }
+      });
       if (res.ok) {
         setProviders(providers.filter(p => p.id !== id));
         alert("Proveedor eliminado correctamente.");
@@ -245,12 +336,12 @@ function App() {
     });
 
     const newTicketId = generateTicketId();
-    const newHistoryRecord = { id: newTicketId, date: ticketMeta.date, provider: ticketMeta.provider, items: [...ticketItems], subtotal: ticketSubtotal, iva: ticketIVA, total: ticketTotal };
+    const newHistoryRecord = { id: newTicketId, date: ticketMeta.date, provider: ticketMeta.provider, items: [...ticketItems], subtotal: ticketSubtotal, iva: ticketIVA, total: ticketTotal, actionUser: currentUser?.username };
     
     try {
       const res = await fetch('http://localhost:5000/api/tickets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newHistoryRecord) });
       if(res.ok) {
-        for (let prod of updatedInventory) { await fetch('http://localhost:5000/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(prod) }); }
+        for (let prod of updatedInventory) { await fetch('http://localhost:5000/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({...prod, actionUser: currentUser?.username}) }); }
         setTicketHistory([newHistoryRecord, ...ticketHistory]); setInventory(updatedInventory); setTicketItems([]); setTicketMeta({ provider: '', date: '' });
         alert(`¡Ticket guardado exitosamente como ${newTicketId}!`);
       }
@@ -260,7 +351,10 @@ function App() {
   const handleDeleteTicket = async (id) => {
     if (!window.confirm("⚠️ ¿Estás seguro de que deseas eliminar este ticket permanentemente? (Esto NO revertirá el inventario)")) return;
     try {
-      const res = await fetch(`http://localhost:5000/api/tickets/${id}`, { method: 'DELETE' });
+      const res = await fetch(`http://localhost:5000/api/tickets/${id}`, { 
+          method: 'DELETE',
+          headers: { 'x-action-user': currentUser?.username }
+      });
       if (res.ok) { setTicketHistory(ticketHistory.filter(t => t.id !== id)); alert("✅ Ticket eliminado exitosamente."); }
     } catch (e) { alert("❌ Error al eliminar el ticket.", e); }
   }
@@ -325,7 +419,8 @@ function App() {
   const handleSaveProductEdit = async (e) => {
     e.preventDefault(); if(!editForm) return;
     try {
-      const res = await fetch('http://localhost:5000/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(editForm) });
+      const payload = { ...editForm, actionUser: currentUser?.username };
+      const res = await fetch('http://localhost:5000/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       if(res.ok) { setInventory(inventory.map(prod => prod.sku === editForm.sku ? editForm : prod)); setFormMode('idle'); setEditForm(null); alert('Producto actualizado.'); }
     } catch(e) { alert("Error al guardar en BD", e); }
   }
@@ -340,7 +435,7 @@ function App() {
     e.preventDefault(); if(!newManualProduct.sku || !newManualProduct.name) return alert("SKU y Nombre obligatorios.");
     if(inventory.some(p => p.sku === newManualProduct.sku)) return alert("Ya existe un producto con este SKU.");
 
-    const productToSave = { ...newManualProduct, stock: Number(newManualProduct.stock), costPrice: Number(newManualProduct.costPrice), salePrice: Number(newManualProduct.salePrice) };
+    const productToSave = { ...newManualProduct, stock: Number(newManualProduct.stock), costPrice: Number(newManualProduct.costPrice), salePrice: Number(newManualProduct.salePrice), actionUser: currentUser?.username };
     try {
       const res = await fetch('http://localhost:5000/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(productToSave) });
       if(res.ok) {
@@ -393,7 +488,7 @@ function App() {
     const cartTotalCost = cart.reduce((sum, item) => sum + (item.costPrice * item.qty), 0);
     const saleProfit = cartSubtotal - cartTotalCost;
 
-    const newTicket = { id: generateSaleId(), date: new Date().toISOString(), displayDate: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(), items: [...cart], subtotal: cartSubtotal, commission: commissionAmount, total: cartTotalFinal, profit: saleProfit, method: paymentData.method, cashGiven: paymentData.method === 'efectivo' ? Number(paymentData.cashGiven) : null, change: changeToGive };
+    const newTicket = { id: generateSaleId(), date: new Date().toISOString(), displayDate: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(), items: [...cart], subtotal: cartSubtotal, commission: commissionAmount, total: cartTotalFinal, profit: saleProfit, method: paymentData.method, cashGiven: paymentData.method === 'efectivo' ? Number(paymentData.cashGiven) : null, change: changeToGive, actionUser: currentUser?.username };
 
     try {
       const res = await fetch('http://localhost:5000/api/sales', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newTicket) });
@@ -420,7 +515,8 @@ function App() {
     updatedInventory[prodIndex].stock = newStock;
 
     try {
-      const res = await fetch('http://localhost:5000/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedInventory[prodIndex]) });
+      const payload = { ...updatedInventory[prodIndex], actionUser: currentUser?.username };
+      const res = await fetch('http://localhost:5000/api/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       if (res.ok) {
         setInventory(updatedInventory);
         setAdjustmentHistory([{ dateISO: new Date().toISOString(), date: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(), sku: adjustData.sku, name: updatedInventory[prodIndex].name, type: adjustData.type, qty: adjustData.qty, reason: adjustData.reason, unitCost: updatedInventory[prodIndex].costPrice, oldStock: currentStock, newStock: newStock }, ...adjustmentHistory]);
@@ -478,7 +574,7 @@ function App() {
     order.items.forEach(cartItem => { const invIndex = updatedInventory.findIndex(i => i.sku === cartItem.sku); if (invIndex >= 0 && updatedInventory[invIndex].stock >= cartItem.qty) updatedInventory[invIndex].stock -= cartItem.qty; else canFulfill = false; });
     if (!canFulfill) return alert("Stock insuficiente.");
     const cartTotalCost = order.items.reduce((sum, item) => sum + (item.costPrice * item.qty), 0);
-    const newTicket = { id: order.id, date: new Date().toISOString(), displayDate: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(), items: [...order.items], subtotal: order.total, commission: 0, total: order.total, profit: order.total - cartTotalCost, method: 'efectivo', cashGiven: order.total, change: 0 };
+    const newTicket = { id: order.id, date: new Date().toISOString(), displayDate: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString(), items: [...order.items], subtotal: order.total, commission: 0, total: order.total, profit: order.total - cartTotalCost, method: 'efectivo', cashGiven: order.total, change: 0, actionUser: currentUser?.username };
     try {
       const res = await fetch('http://localhost:5000/api/sales', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newTicket) });
       if (res.ok) { setSalesHistory([newTicket, ...salesHistory]); setInventory(updatedInventory); setWaOrders(waOrders.filter(o => o.id !== orderId)); alert(`¡Pedido completado!`); }
@@ -854,8 +950,11 @@ function App() {
           {currentUser?.role === 'Administrador' && (
             <section className="form-section" style={{border: '2px solid #ef4444', backgroundColor: '#fff', width: '100%', marginTop: '2rem' }}>
               <h2 style={{color: '#ef4444', textAlign: 'center'}}>⚠️ Zona de Peligro: Gestión de Base de Datos</h2>
-              <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginTop: '1.5rem'}}><button className="btn-primary" style={{background: '#3b82f6'}} onClick={handleDbInitialize}>🔄 Iniciar / Cargar DB</button><button className="btn-primary" style={{background: '#ef4444'}} onClick={handleDbClear}>🗑️ Limpiar DB Local</button><button className="btn-primary" style={{background: '#10b981'}} onClick={handleDbSave}>💾 Guardar DB en Servidor</button></div>
-              <button className="btn-secondary full-width" style={{marginTop: '1rem'}} onClick={() => window.open('http://localhost:5000/api/db/backup')}>📥 Descargar Respaldo Físico (.db)</button>
+              <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginTop: '1.5rem'}}><input type="file" accept=".db,.sqlite" style={{ display: 'none' }} ref={fileInputRef} onChange={handleDbUpload} />
+<button className="btn-primary" style={{background: '#3b82f6'}} onClick={() => fileInputRef.current.click()}>🔄 Iniciar / Cargar DB</button><button className="btn-primary" style={{background: '#ef4444'}} onClick={handleDbClear}>🗑️ Limpiar DB Local</button><button className="btn-primary" style={{background: '#10b981'}} onClick={handleDbSave}>💾 Guardar DB en Servidor</button></div>
+              
+              {/* NUEVA RUTA PARA DESCARGAR EL RESPALDO DEL BACKEND */}
+              <button className="btn-secondary full-width" style={{marginTop: '1rem'}} onClick={() => window.location.href = `http://localhost:5000/api/db/backup?actionUser=${currentUser?.username || 'Sistema'}`}>📥 Descargar Respaldo Físico (.db)</button>
             </section>
           )}
         </main>
