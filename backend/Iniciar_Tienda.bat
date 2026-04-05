@@ -9,10 +9,11 @@ if not exist "%~dp0dist" echo ERROR: No se encuentra la carpeta dist && pause &&
 
 echo Preparando el navegador para iniciar desde cero...
 :: Lanza un contador en segundo plano que espera 2 segundos y luego abre Chrome en Incognito
-start /b cmd /c "timeout /t 2 >nul & start  http://localhost:5000"
+start /b cmd /c "timeout /t 2 >nul & start  http://localhost:5173"
 
 echo Iniciando servidor...
 :: Ejecutamos node y mantenemos la ventana abierta pase lo que pase
 "%~dp0node.exe" "%~dp0server.js"
 if %errorlevel% neq 0 echo El servidor se detuvo con un error. && pause
 pause
+

@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from 'react' // <--- AÑADE useRef
+import { useState, useEffect, useRef } from 'react'
 import './App.css'
 
-// Helpers externos para generar IDs y evitar el error "impure function" del linter
+// Helpers externos para generar IDs
 const generateTicketId = () => `TKT-${new Date().getTime().toString().slice(-6)}`;
 const generateSaleId = () => `VTA-${new Date().getTime().toString().slice(-6)}`;
 const generateWaId = () => `WAPP-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
@@ -9,7 +9,8 @@ const generateWaId = () => `WAPP-${Math.floor(Math.random() * 1000).toString().p
 function App() {
 
   const fileInputRef = useRef(null);
-  // --- PERSISTENCIA, AUTENTICACIÓN Y ESTADOS GLOBALES PRIMERO ---
+  
+  // --- PERSISTENCIA, AUTENTICACIÓN Y ESTADOS GLOBALES ---
   const [isLoggedIn, setIsLoggedIn] = useState(() => localStorage.getItem('isLoggedIn') === 'true');
   const [activeView, setActiveView] = useState(() => localStorage.getItem('activeView') || 'dashboard');
   const [cart, setCart] = useState(() => JSON.parse(localStorage.getItem('currentCart')) || []);
@@ -35,9 +36,9 @@ function App() {
 
   const themeStyles = { '--primary-color': primaryColor, '--accent-color': accentColor }
 
-  // --- EFECTOS (SIEMPRE DESPUÉS DE LOS ESTADOS) ---
+  // --- EFECTOS ---
 
-  // 🚀 NUEVO EFECTO: Obtener configuración visual apenas carga la app
+  // Obtener configuración visual apenas carga la app
   useEffect(() => {
     fetch('http://localhost:5000/api/settings')
       .then(res => res.json())
@@ -155,7 +156,13 @@ function App() {
           method: 'DELETE',
           headers: { 'x-action-user': currentUser.username }
       });
-      if (res.ok) { alert("Usuario eliminado."); fetchUsers(); }
+      if (res.ok) { 
+        alert("Usuario eliminado."); 
+        fetchUsers(); 
+      } else {
+        const data = await res.json();
+        alert(data.error);
+      }
     } catch (e) { alert("Error al eliminar usuario.", e); }
   }
 
@@ -176,7 +183,7 @@ function App() {
     localStorage.removeItem('currentUser'); localStorage.removeItem('isLoggedIn');
   }
 
-  // 🚀 LÓGICA MÓDULO 2 ACTUALIZADA (AJUSTES)
+  // --- MÓDULO 2: CONFIGURACIÓN ---
   const handleSaveSettings = async (e) => {
     e.preventDefault();
     const payload = {
@@ -207,19 +214,18 @@ function App() {
   }
 
   // --- ZONA DE BASE DE DATOS (MÓDULO CONFIG) ---
- const handleDbUpload = (e) => {
+  const handleDbUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
     if (!window.confirm(`⚠️ ATENCIÓN: Estás a punto de reemplazar TODA la base de datos actual con el archivo "${file.name}". Perderás los datos actuales si no tienes respaldo. ¿Deseas continuar?`)) {
-      e.target.value = null; // Reseteamos el input
+      e.target.value = null; 
       return;
     }
 
     const reader = new FileReader();
     reader.readAsDataURL(file);
     reader.onload = async () => {
-      // Extraemos solo el base64 de la cadena que genera FileReader
       const base64Data = reader.result.split(',')[1];
       
       try {
@@ -231,7 +237,7 @@ function App() {
         
         if (res.ok) {
           alert("✅ Base de datos restaurada correctamente. El sistema se reiniciará para cargar los nuevos datos.");
-          window.location.reload(); // Recarga la página para mostrar los nuevos datos
+          window.location.reload(); 
         } else {
           const err = await res.json();
           alert("❌ Error al cargar la base de datos: " + err.error);
@@ -241,8 +247,20 @@ function App() {
       }
     };
     
-    e.target.value = null; // Reseteamos el input para poder subir el mismo archivo después si es necesario
+    e.target.value = null; 
   }
+
+   const handleDbSave = async () => {
+
+    try {
+
+      const res = await fetch('http://localhost:5000/api/db/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inventory, sales: salesHistory }) });
+
+      if (res.ok) alert("💾 Información guardada exitosamente en el archivo local.");
+
+    } catch (e) { alert("❌ Error al guardar DB.", e); }
+
+  };
 
   const handleDbClear = async () => {
     if (!window.confirm("⚠️ ¿Borrar TODO el inventario, ventas y tickets? (Usuarios y Proveedores NO se borrarán)")) return;
@@ -254,13 +272,6 @@ function App() {
       });
       if (res.ok) { localStorage.removeItem('currentCart'); setCart([]); alert("✅ Sistema limpio."); window.location.reload(); }
     } catch (e) { alert("❌ Error al limpiar DB.", e); }
-  };
-
-  const handleDbSave = async () => {
-    try {
-      const res = await fetch('http://localhost:5000/api/db/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inventory, sales: salesHistory }) });
-      if (res.ok) alert("💾 Información guardada exitosamente en el archivo local.");
-    } catch (e) { alert("❌ Error al guardar DB.", e); }
   };
 
   // --- LÓGICA MÓDULO PROVEEDORES ---

@@ -70,7 +70,8 @@ const registrarMovimiento = async (username, module, action, description, detail
 };
 
 // Función auxiliar para extraer el usuario de la petición
-const getActionUser = (req) => req.body.actionUser || req.headers['x-action-user'] || 'Sistema';
+// Función auxiliar para extraer el usuario de la petición
+const getActionUser = (req) => req.body?.actionUser || req.headers?.['x-action-user'] || 'Sistema';
 
 // Conexión a DB y Creación de Tablas
 (async () => {
@@ -104,7 +105,7 @@ const getActionUser = (req) => req.body.actionUser || req.headers['x-action-user
                 `INSERT INTO users (name, username, password, role, permissions) VALUES ('Administrador Maestro', 'admin', ?, 'Administrador', ?)`,
                 [defaultHash, defaultPerms]
             );
-            console.log('👑 Usuario Maestro creado automáticamente. Usuario: **** | Clave: ********');
+            console.log('👑 Usuario Maestro creado automáticamente. Usuario: admin | Clave: admin123');
             
             await registrarMovimiento('Sistema', 'Sistema', 'INICIALIZACIÓN', 'Creación de usuario administrador maestro.');
         }
@@ -183,13 +184,28 @@ app.post('/api/users', async (req, res) => {
     }
 });
 
+// 🚀 RUTA ACTUALIZADA PARA BLOQUEAR BORRADO SI NO ES ADMINISTRADOR
 app.delete('/api/users/:id', async (req, res) => {
     const actionUser = getActionUser(req);
     try { 
-        const user = await db.get('SELECT username FROM users WHERE id = ?', [req.params.id]);
-        if (user) {
+        // 1. Verificar si el usuario que solicita la acción es realmente un Administrador
+        const requestingUser = await db.get('SELECT role FROM users WHERE username = ?', [actionUser]);
+        
+        if (!requestingUser || requestingUser.role !== 'Administrador') {
+            return res.status(403).json({ error: 'Acceso denegado: Solo un Administrador puede eliminar usuarios del sistema.' });
+        }
+
+        // 2. Buscar al usuario que se desea eliminar
+        const userToDelete = await db.get('SELECT username FROM users WHERE id = ?', [req.params.id]);
+        
+        if (userToDelete) {
+            // Protección extra: Evitar que el administrador se borre a sí mismo
+            if (userToDelete.username === actionUser) {
+                return res.status(400).json({ error: 'Acción no permitida: No puedes eliminar tu propia cuenta de usuario.' });
+            }
+
             await db.run('DELETE FROM users WHERE id = ?', [req.params.id]); 
-            await registrarMovimiento(actionUser, 'Usuarios', 'ELIMINAR', `Se eliminó al usuario: ${user.username}.`);
+            await registrarMovimiento(actionUser, 'Usuarios', 'ELIMINAR', `Se eliminó al usuario: ${userToDelete.username}.`);
         }
         res.json({ success: true }); 
     } catch (e) { res.status(500).json({ error: e.message }); }
